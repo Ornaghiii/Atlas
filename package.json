@@ -1,0 +1,85 @@
+{
+  "name": "atlas-patrimonial",
+  "version": "1.0.0",
+  "private": true,
+  "main": "dist-main/electron/main.js",
+  "scripts": {
+    "dev": "concurrently \"vite\" \"tsx server/index.ts\"",
+    "build": "tsc -b && vite build",
+    "start": "tsx server/index.ts",
+    "db:generate": "prisma generate",
+    "db:push": "prisma db push",
+    "electron:dev": "concurrently \"tsc -p tsconfig.electron.json --watch\" \"electron .\"",
+    "electron:build": "npm run build && npx prisma generate && node scripts/create-empty-db.mjs && tsc -p tsconfig.electron.json && electron-builder",
+    "test": "vitest --run",
+    "postinstall": "prisma generate"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.1.0",
+    "chart.js": "^4.4.7",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "framer-motion": "^11.15.0",
+    "lucide-react": "^0.468.0",
+    "react": "^18.3.1",
+    "react-chartjs-2": "^5.3.0",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.2",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "@vitest/coverage-v8": "4.1.10",
+    "concurrently": "^9.1.0",
+    "electron": "43.1.0",
+    "electron-builder": "26.15.3",
+    "fast-check": "4.9.0",
+    "prisma": "^6.1.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.5",
+    "vitest": "4.1.10"
+  },
+  "build": {
+    "appId": "com.atlas.patrimonial",
+    "productName": "Atlas",
+    "directories": {
+      "output": "dist-electron"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-main/**/*",
+      "server/**/*",
+      "prisma/schema.prisma",
+      "node_modules/**/*",
+      "node_modules/.prisma/**/*",
+      "!node_modules/.cache/**/*"
+    ],
+    "asar": false,
+    "extraResources": [
+      {
+        "from": "prisma/empty.db",
+        "to": "prisma/dev.db"
+      },
+      {
+        "from": "node_modules/.prisma",
+        "to": "prisma-client/node_modules/.prisma"
+      },
+      {
+        "from": "node_modules/@prisma/client",
+        "to": "prisma-client/node_modules/@prisma/client"
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "electron/assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}
