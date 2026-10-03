@@ -192,6 +192,113 @@ h2 {
   border-radius: 100%;
   background: #b79cff;
 }
+
+/* ── Painel de Notificações ── */
+.notif-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  /* fundo semi-transparente sutil — não bloqueia visualmente a UI */
+  background: transparent;
+}
+.notif-panel {
+  position: fixed;
+  top: 62px;
+  right: 24px;
+  width: 340px;
+  max-height: 480px;
+  background: #17161e;
+  border: 1px solid #292733;
+  border-radius: 18px;
+  box-shadow: 0 24px 60px #00000055, 0 2px 8px #0002;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  z-index: 301;
+}
+.notif-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 18px 12px;
+  border-bottom: 1px solid #1f1d28;
+  font-size: 13px;
+  font-weight: 700;
+  color: #e8e3f4;
+  letter-spacing: 0.02em;
+}
+.notif-count {
+  margin-left: auto;
+  background: #b79cff;
+  color: #16131e;
+  font-style: normal;
+  font-size: 11px;
+  font-weight: 800;
+  border-radius: 99px;
+  padding: 1px 7px;
+  line-height: 1.6;
+}
+.notif-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 40px 20px;
+  color: #5e5873;
+}
+.notif-empty span {
+  font-size: 22px;
+  color: #4ade80;
+}
+.notif-empty p {
+  font-size: 13px;
+  margin: 0;
+}
+.notif-list {
+  list-style: none;
+  margin: 0;
+  padding: 8px 0;
+  overflow-y: auto;
+  flex: 1;
+}
+.notif-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 18px;
+  border-bottom: 1px solid #1c1b24;
+  transition: background 0.15s;
+}
+.notif-item:last-child {
+  border-bottom: none;
+}
+.notif-item:hover {
+  background: #1e1c28;
+}
+.notif-emoji {
+  font-size: 20px;
+  line-height: 1.3;
+  flex-shrink: 0;
+}
+.notif-item b {
+  display: block;
+  font-size: 12.5px;
+  color: #e8e3f4;
+  font-weight: 700;
+  margin-bottom: 3px;
+}
+.notif-item p {
+  font-size: 12px;
+  color: #7b7490;
+  margin: 0;
+  line-height: 1.5;
+}
+/* Cores de destaque por tipo */
+.notif-goal_done b  { color: #fbbf24; }
+.notif-deadline b   { color: #f87171; }
+.notif-negative_balance b { color: #f87171; }
+.notif-goal_near b  { color: #a78bfa; }
 .add-button,
 .save {
   display: flex;
@@ -1534,4 +1641,296 @@ input {
   flex: 1;
   justify-content: center;
   min-height: 42px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   NOVAS FEATURES — ESTILOS
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* ── Botão de editar (lançamentos) ── */
+.edit-button {
+  margin-left: 6px;
+  width: 31px;
+  height: 31px;
+  border-radius: 9px;
+  color: #827b8b;
+  display: grid;
+  place-items: center;
+  transition: 0.18s;
+}
+.edit-button:hover {
+  background: #1f2a3c;
+  color: #7dd3fc;
+}
+
+/* ── Badges de recorrência e parcelamento na linha do lançamento ── */
+.badge-recurrent,
+.badge-installment {
+  font-style: normal;
+  font-size: 9.5px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 99px;
+  margin-left: 4px;
+  letter-spacing: 0.02em;
+}
+.badge-recurrent {
+  background: #1e2e1e;
+  color: #6ed39e;
+}
+.badge-installment {
+  background: #1c2233;
+  color: #7dd3fc;
+}
+
+/* ── Opções extras no RegisterModal (recorrência + parcelamento) ── */
+.extra-options {
+  margin-top: 14px;
+  padding: 13px 14px;
+  background: #131120;
+  border: 1px solid #2d2940;
+  border-radius: 12px;
+  display: grid;
+  gap: 10px;
+}
+.toggle-row {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 0 !important;
+  font-size: 12px !important;
+  color: #c5bdd4 !important;
+}
+.toggle-row input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: #b79cff;
+  cursor: pointer;
+}
+.installment-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.installment-row input {
+  width: 70px;
+  text-align: center;
+}
+.installment-row span {
+  font-size: 12px;
+  color: #888393;
+}
+
+/* ── Campo de prazo no formulário de objetivos ── */
+.goal-deadline-label {
+  display: grid;
+  gap: 6px;
+  font-size: 11px;
+  color: #a6a0b0;
+  margin-top: 10px;
+}
+.goal-deadline-label input[type="date"] {
+  border: 1px solid #35313d;
+  background: #111016;
+  color: #f8f5ff;
+  padding: 10px 12px;
+  border-radius: 9px;
+  outline: 0;
+  font-family: inherit;
+  font-size: 13px;
+  color-scheme: dark;
+}
+.goal-deadline-label input[type="date"]:focus {
+  border-color: #b79cff;
+  box-shadow: 0 0 0 3px #a78bfa22;
+}
+
+/* ── Página de Orçamento ── */
+.budget-page {
+  max-width: 720px;
+}
+.budget-hint {
+  font-size: 12px;
+  color: #77738b;
+  margin: -8px 0 20px;
+}
+.budget-list {
+  display: grid;
+  gap: 6px;
+}
+.budget-row {
+  padding: 14px 0;
+  border-top: 1px solid #1f1d28;
+}
+.budget-row:first-child {
+  border-top: none;
+}
+.budget-row-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.budget-cat {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: #e2ddf0;
+  flex: 1;
+}
+.budget-spent {
+  font-size: 12px;
+  color: #888393;
+  text-align: right;
+}
+.budget-spent em {
+  font-style: normal;
+}
+.budget-spent em.warn {
+  color: #fbbf24;
+  font-weight: 700;
+}
+.budget-spent em.over {
+  color: #f87171;
+  font-weight: 700;
+}
+.budget-actions {
+  display: flex;
+  gap: 4px;
+}
+.budget-edit-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 4px;
+}
+.budget-edit-row input {
+  flex: 1;
+  border: 1px solid #35313d;
+  background: #111016;
+  color: #f8f5ff;
+  padding: 9px 12px;
+  border-radius: 9px;
+  outline: 0;
+  font-size: 13px;
+}
+.budget-edit-row input:focus {
+  border-color: #b79cff;
+  box-shadow: 0 0 0 3px #a78bfa22;
+}
+.budget-edit-row .save {
+  margin: 0;
+  padding: 9px 16px;
+  min-height: unset;
+}
+.budget-bar-wrap {
+  height: 6px;
+  background: #232130;
+  border-radius: 99px;
+  overflow: hidden;
+}
+.budget-bar {
+  height: 100%;
+  background: #a78bfa;
+  border-radius: 99px;
+  transition: width 0.4s ease;
+}
+.budget-bar.warn {
+  background: #fbbf24;
+}
+.budget-bar.over {
+  background: #f87171;
+  width: 100% !important;
+}
+.budget-no-limit {
+  font-size: 11px;
+  color: #4a4658;
+  margin: 0;
+}
+
+/* ── Estatísticas — comparativo mês a mês ── */
+.stats-comparison {
+  margin-top: 20px;
+}
+.stats-month-header,
+.stats-cat-row {
+  display: grid;
+  grid-template-columns: 120px repeat(4, 1fr);
+  gap: 8px;
+  align-items: end;
+}
+.stats-month-header {
+  padding-bottom: 10px;
+  border-bottom: 1px solid #1f1d28;
+  margin-bottom: 6px;
+}
+.stats-cat-label {
+  font-size: 11px;
+  color: #8c8695;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stats-month-col {
+  text-align: center;
+  font-size: 10px;
+  color: #6b6477;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.stats-month-col.current {
+  color: #b79cff;
+}
+.stats-cat-row {
+  padding: 8px 0;
+  border-top: 1px solid #18161f;
+  align-items: center;
+}
+.stats-cat-row .stats-month-col {
+  font-size: 11px;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  color: #888393;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+.stats-cat-row .stats-month-col.current {
+  color: #e8e3f4;
+  font-weight: 700;
+}
+.stats-mini-bar-wrap {
+  width: 100%;
+  height: 28px;
+  background: #1a1825;
+  border-radius: 4px;
+  overflow: hidden;
+  display: flex;
+  align-items: flex-end;
+}
+.stats-mini-bar {
+  width: 100%;
+  background: #a78bfa55;
+  border-radius: 4px 4px 0 0;
+  min-height: 2px;
+  transition: height 0.35s ease;
+}
+.stats-month-col.current .stats-mini-bar {
+  background: #a78bfa;
+}
+
+/* ── Responsivo: orçamento e stats em telas menores ── */
+@media (max-width: 740px) {
+  .stats-month-header,
+  .stats-cat-row {
+    grid-template-columns: 80px repeat(4, 1fr);
+    gap: 4px;
+  }
+  .budget-row-header {
+    flex-wrap: wrap;
+  }
 }

@@ -147,17 +147,54 @@ app.delete("/api/goals/:id", route(async (req, res) => {
 }));
 app.get("/api/transactions", route(async (_, res) => res.json(await db.transaction.findMany({ orderBy: { date: "desc" } }))));
 app.post("/api/transactions", route(async (req, res) => {
+    const type = String(req.body.type);
+    const category = String(req.body.category);
+    const note = req.body.note || null;
+    const amount = asNumber(req.body.amount);
+    const baseDate = req.body.date ? new Date(req.body.date) : new Date();
+    const recurrent = req.body.recurrent === true || req.body.recurrent === "true";
+    const totalInstallments = req.body.totalInstallments !== undefined
+        ? Math.max(1, Math.min(60, asNumber(req.body.totalInstallments)))
+        : 1;
+    const xpKey = `transaction_${type.toLowerCase()}`;
+    // Parcelamento: criar N transações com datas mensais corridas
+    if (totalInstallments > 1) {
+        // O `amount` recebido é o valor TOTAL da compra.
+        // Cada parcela vale amount / totalInstallments (arredondado nos centavos).
+        const installmentAmount = Math.round((amount / totalInstallments) * 100) / 100;
+        const groupId = Math.random().toString(36).slice(2) + Date.now().toString(36);
+        const created = await Promise.all(Array.from({ length: totalInstallments }, (_, i) => {
+            const d = new Date(baseDate);
+            d.setMonth(d.getMonth() + i);
+            return db.transaction.create({
+                data: {
+                    type,
+                    category,
+                    note: note ? `${note} (${i + 1}/${totalInstallments})` : null,
+                    amount: installmentAmount,
+                    date: d,
+                    recurrent: false,
+                    installment: i + 1,
+                    totalInstallments,
+                    installmentGroup: groupId,
+                },
+            });
+        }));
+        if (xpKey in XP_RULES)
+            void grantXp(XP_RULES[xpKey]);
+        return res.status(201).json(created[0]);
+    }
+    // Transação simples (com ou sem flag recorrente)
     const tx = await db.transaction.create({
         data: {
-            type: String(req.body.type),
-            category: String(req.body.category),
-            note: req.body.note || null,
-            amount: asNumber(req.body.amount),
-            date: req.body.date ? new Date(req.body.date) : new Date(),
+            type,
+            category,
+            note,
+            amount,
+            date: baseDate,
+            recurrent,
         },
     });
-    const type = String(req.body.type).toLowerCase();
-    const xpKey = `transaction_${type}`;
     if (xpKey in XP_RULES)
         void grantXp(XP_RULES[xpKey]);
     return res.status(201).json(tx);
@@ -190,6 +227,69 @@ app.patch("/api/profile", async (req, res) => res.json(await db.profile.upsert({
     create: { id: "local-profile", ...req.body },
     update: req.body,
 })));
+// ---------------------------------------------------------------------------
+// Orçamento por categoria
+// ---------------------------------------------------------------------------
+app.get("/api/budgets", route(async (_, res) => res.json(await db.budget.findMany())));
+app.put("/api/budgets/:category", route(async (req, res) => {
+    const category = decodeURIComponent(String(req.params.category));
+    const limit = asNumber(req.body.limit);
+    if (!limit)
+        return res.status(400).json({ error: "Limite inválido." });
+    const budget = await db.budget.upsert({
+        where: { category },
+        create: { category, limit },
+        update: { limit },
+    });
+    res.json(budget);
+}));
+app.delete("/api/budgets/:category", route(async (req, res) => {
+    const category = decodeURIComponent(String(req.params.category));
+    const result = await db.budget.deleteMany({ where: { category } });
+    if (!result.count)
+        return res.status(404).json({ error: "Orçamento não encontrado." });
+    res.status(204).end();
+}));
+// ---------------------------------------------------------------------------
+// Lançar recorrentes do mês atual (chamado pelo frontend ao abrir o app)
+// Para cada transação recorrente cujo mês/ano atual ainda não foi lançado,
+// cria uma cópia com a data de hoje.
+// ---------------------------------------------------------------------------
+app.post("/api/transactions/apply-recurrent", route(async (_, res) => {
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+    const recurrents = await db.transaction.findMany({
+        where: { recurrent: true },
+    });
+    const thisMonthTxs = await db.transaction.findMany({
+        where: { date: { gte: monthStart, lte: monthEnd } },
+    });
+    const created = [];
+    for (const r of recurrents) {
+        // O próprio lançamento recorrente também conta como ocorrência quando
+        // foi criado neste mês. Ignorá-lo fazia a primeira abertura duplicá-lo.
+        const alreadyLaunched = thisMonthTxs.some((t) => t.category === r.category &&
+            t.type === r.type &&
+            t.amount === r.amount &&
+            t.note === r.note);
+        if (!alreadyLaunched) {
+            const d = new Date(now.getFullYear(), now.getMonth(), new Date(r.date).getDate());
+            const newTx = await db.transaction.create({
+                data: {
+                    type: r.type,
+                    category: r.category,
+                    note: r.note,
+                    amount: r.amount,
+                    date: d,
+                    recurrent: false, // a cópia não é recorrente em si
+                },
+            });
+            created.push(newTx);
+        }
+    }
+    res.json({ launched: created.length, items: created });
+}));
 // Rota de histórico patrimonial: reconstrói mês a mês nos últimos 7 meses
 // somando o valor atual dos ativos (snapshot recente) e ajustando pelo
 // fluxo líquido (receitas − despesas − aportes) de cada mês passado.
@@ -259,7 +359,9 @@ app.get("/api/summary", async (_, res) => {
     ]);
     const now = new Date();
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-    const month = transactions.filter((t) => t.date >= monthStart);
+    // Limita ao momento atual: parcelas parceladas com datas futuras (mesmo
+    // dentro do mês) não entram nos totais — só o que já saiu de verdade.
+    const month = transactions.filter((t) => t.date >= monthStart && t.date <= now);
     const sum = (items) => items.reduce((total, item) => total + item.amount, 0);
     const sumAssets = (items) => items.reduce((total, item) => total + item.value, 0);
     const income = sum(month.filter((t) => t.type === "Receita"));
@@ -385,14 +487,36 @@ async function ensureSchema() {
     const hasAssetId = goalColumns.some((c) => c.name === "assetId");
     if (!hasAssetId) {
         console.log("[migration] adicionando coluna assetId em Goal...");
-        // Objetivos deixam de ter saldo próprio: passam a apontar para um
-        // Investimento (Asset), cujo valor atual vira o progresso do
-        // objetivo. Um mesmo investimento só pode estar vinculado a um
-        // objetivo por vez (índice único).
         await db.$executeRawUnsafe(`ALTER TABLE "Goal" ADD COLUMN "assetId" TEXT`);
         await db.$executeRawUnsafe(`CREATE UNIQUE INDEX "Goal_assetId_key" ON "Goal"("assetId")`);
         console.log("[migration] concluída.");
     }
+    // Colunas adicionadas para recorrência, parcelamento e orçamento
+    // Nota: Transaction é palavra reservada do SQLite — precisa de aspas duplas.
+    const txColumns = await db.$queryRawUnsafe(`PRAGMA table_info("Transaction")`);
+    const txColNames = new Set(txColumns.map((c) => c.name));
+    if (!txColNames.has("recurrent")) {
+        await db.$executeRawUnsafe(`ALTER TABLE "Transaction" ADD COLUMN "recurrent" INTEGER NOT NULL DEFAULT 0`);
+    }
+    if (!txColNames.has("installment")) {
+        await db.$executeRawUnsafe(`ALTER TABLE "Transaction" ADD COLUMN "installment" INTEGER`);
+    }
+    if (!txColNames.has("totalInstallments")) {
+        await db.$executeRawUnsafe(`ALTER TABLE "Transaction" ADD COLUMN "totalInstallments" INTEGER`);
+    }
+    if (!txColNames.has("installmentGroup")) {
+        await db.$executeRawUnsafe(`ALTER TABLE "Transaction" ADD COLUMN "installmentGroup" TEXT`);
+    }
+    // Tabela Budget (orçamento por categoria)
+    await db.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS "Budget" (
+      "id" TEXT NOT NULL PRIMARY KEY,
+      "category" TEXT NOT NULL,
+      "limit" REAL NOT NULL,
+      "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "Budget_category_key" UNIQUE ("category")
+    )
+  `);
 }
 // Serve the built frontend in production. When packaged, this compiled
 // file lives at dist-main/server/index.js, two levels below the app

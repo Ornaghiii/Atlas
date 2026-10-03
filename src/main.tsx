@@ -16,6 +16,8 @@ import {
   LineChart,
   Menu,
   MoreHorizontal,
+  Pencil,
+  PiggyBank,
   Plus,
   RefreshCw,
   Settings,
@@ -74,6 +76,7 @@ const nav: Array<[string, React.ElementType]> = [
   ["Objetivos", Target],
   ["Simulações", LineChart],
   ["Cronograma", Goal],
+  ["Orçamento", PiggyBank],
   ["Estatísticas", CircleDollarSign],
   ["Conquistas", Trophy],
   ["Perfil Financeiro", Crown],
@@ -294,10 +297,149 @@ function ConfirmDialog({
   );
 }
 
+// ---------------------------------------------------------------------------
+// Notificações derivadas dos dados existentes (goals + summary)
+// ---------------------------------------------------------------------------
+type AppNotification = {
+  id: string;
+  kind: "goal_near" | "goal_done" | "deadline" | "negative_balance";
+  message: string;
+  detail: string;
+};
+
+function buildNotifications(
+  goalList: GoalItem[],
+  assetList: AssetItem[],
+  summary: Summary | null,
+): AppNotification[] {
+  const notes: AppNotification[] = [];
+
+  // Saldo mensal negativo
+  if (summary && summary.monthlySavings < 0) {
+    notes.push({
+      id: "negative_balance",
+      kind: "negative_balance",
+      message: "Saldo mensal negativo",
+      detail: `Suas despesas superaram suas receitas em ${money.format(Math.abs(summary.monthlySavings))} este mês.`,
+    });
+  }
+
+  for (const g of goalList) {
+    if (g.status !== "Ativa") continue;
+
+    // Valor real do objetivo: ativo vinculado tem precedência sobre goal.current
+    const linkedValue =
+      g.assetId
+        ? (assetList.find((a) => a.id === g.assetId)?.value ?? g.current)
+        : g.current;
+    const pct = g.target > 0 ? linkedValue / g.target : 0;
+
+    // Objetivo concluído
+    if (pct >= 1) {
+      notes.push({
+        id: `goal_done_${g.id}`,
+        kind: "goal_done",
+        message: `Objetivo concluído: ${g.name}`,
+        detail: `Você atingiu ${money.format(linkedValue)} de ${money.format(g.target)}. Parabéns!`,
+      });
+      continue;
+    }
+
+    // Objetivo ≥ 80% da meta
+    if (pct >= 0.8) {
+      notes.push({
+        id: `goal_near_${g.id}`,
+        kind: "goal_near",
+        message: `Quase lá: ${g.name}`,
+        detail: `${Math.round(pct * 100)}% concluído — faltam apenas ${money.format(g.target - linkedValue)}.`,
+      });
+    }
+
+    // Prazo em ≤ 30 dias
+    if (g.deadline) {
+      const days = Math.ceil(
+        (new Date(g.deadline).getTime() - Date.now()) / 86_400_000,
+      );
+      if (days >= 0 && days <= 30) {
+        notes.push({
+          id: `deadline_${g.id}`,
+          kind: "deadline",
+          message: `Prazo próximo: ${g.name}`,
+          detail:
+            days === 0
+              ? "O prazo deste objetivo é hoje!"
+              : `Vence em ${days} dia${days > 1 ? "s" : ""}.`,
+        });
+      }
+    }
+  }
+
+  return notes;
+}
+
+const kindIcon: Record<AppNotification["kind"], string> = {
+  goal_near: "🎯",
+  goal_done: "🏆",
+  deadline: "⏰",
+  negative_balance: "⚠️",
+};
+
+function NotificationsPanel({
+  notifications,
+  onClose,
+}: {
+  notifications: AppNotification[];
+  onClose: () => void;
+}) {
+  return (
+    <motion.div
+      className="notif-backdrop"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      onClick={onClose}
+    >
+      <motion.div
+        className="notif-panel"
+        initial={{ opacity: 0, y: -8, scale: 0.97 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, y: -8, scale: 0.97 }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="notif-header">
+          <span>Notificações</span>
+          {notifications.length > 0 && (
+            <em className="notif-count">{notifications.length}</em>
+          )}
+        </div>
+        {notifications.length === 0 ? (
+          <div className="notif-empty">
+            <span>✓</span>
+            <p>Tudo em ordem por aqui.</p>
+          </div>
+        ) : (
+          <ul className="notif-list">
+            {notifications.map((n) => (
+              <li key={n.id} className={`notif-item notif-${n.kind}`}>
+                <span className="notif-emoji">{kindIcon[n.kind]}</span>
+                <div>
+                  <b>{n.message}</b>
+                  <p>{n.detail}</p>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </motion.div>
+    </motion.div>
+  );
+}
+
 function App() {
   const [page, setPage] = useState("Visão geral");
   const [menu, setMenu] = useState(false);
   const [modal, setModal] = useState(false);
+  const [notifOpen, setNotifOpen] = useState(false);
   const [dialogRequest, setDialogRequest] = useState<DialogRequest | null>(
     null,
   );
@@ -333,6 +475,10 @@ function App() {
             category: item.category,
             amount: item.amount,
             date: new Date(item.date).toLocaleDateString("pt-BR"),
+            isoDate: item.date, // data ISO original para filtros de futuro/passado
+            recurrent: item.recurrent,
+            installment: item.installment,
+            totalInstallments: item.totalInstallments,
           })),
         );
       })
@@ -346,6 +492,45 @@ function App() {
   useEffect(() => {
     refreshSummary();
   }, [records]);
+
+  // Dispara as despesas recorrentes do mês atual ao iniciar o app.
+  // O endpoint só cria uma cópia se ainda não existe um lançamento
+  // com os mesmos dados neste mês — é idempotente, pode chamar toda
+  // vez que o app abre sem risco de duplicar.
+  const refreshTransactions = () =>
+    fetch("http://localhost:3333/api/transactions")
+      .then((r) => (r.ok ? r.json() : Promise.reject()))
+      .then((items: any[]) =>
+        setRecords(
+          items.map((item) => ({
+            id: item.id,
+            type: item.type,
+            title: item.note || item.category,
+            category: item.category,
+            amount: item.amount,
+            date: new Date(item.date).toLocaleDateString("pt-BR"),
+            isoDate: item.date,
+            recurrent: item.recurrent,
+            installment: item.installment,
+            totalInstallments: item.totalInstallments,
+          })),
+        ),
+      )
+      .catch(() => undefined);
+
+  useEffect(() => {
+    fetch("http://localhost:3333/api/transactions/apply-recurrent", {
+      method: "POST",
+    })
+      .then((r) => (r.ok ? r.json() : Promise.reject()))
+      .then((result: { launched: number }) => {
+        // Se alguma despesa recorrente foi lançada agora, recarrega a lista
+        if (result.launched > 0) {
+          void refreshTransactions();
+        }
+      })
+      .catch(() => undefined); // silencioso — não quebra se o backend ainda estiver subindo
+  }, []);
   const refreshProfile = () =>
     fetch("http://localhost:3333/api/profile")
       .then((r) => (r.ok ? r.json() : Promise.reject()))
@@ -360,7 +545,37 @@ function App() {
   useEffect(() => {
     refreshGoals();
   }, [page]);
-  const deleteRecord = async (id: string | number) => {
+  const deleteRecord = async (record: RecordItem) => {
+    const id = record.id;
+
+    // Se é recorrente, oferece escolha entre cancelar só este mês ou a recorrência toda
+    if (record.recurrent && typeof id === "string") {
+      const cancelAll = await confirmDialog(
+        `"${record.title}" é uma despesa recorrente.\n\nConfirmar cancela a recorrência inteira (não será mais lançada nos próximos meses). Para apagar só este mês, pressione Cancelar e use o ícone de lixeira normalmente após desmarcar a opção.`,
+      );
+      if (cancelAll) {
+        // Cancela a recorrência: PATCH recurrent = false no template
+        try {
+          await fetch(`http://localhost:3333/api/transactions/${id}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ recurrent: false }),
+          });
+          // Atualiza localmente o badge sem remover o lançamento
+          setRecords((current) =>
+            current.map((r) =>
+              r.id === id ? { ...r, recurrent: false } : r,
+            ),
+          );
+        } catch {
+          // silencioso
+        }
+        return;
+      }
+      // Se cancelou o confirmDialog, não faz nada
+      return;
+    }
+
     if (
       !(await confirmDialog(
         "Excluir este lançamento? Esta ação não pode ser desfeita.",
@@ -378,13 +593,45 @@ function App() {
     } catch {
       return;
     }
-    setRecords((current) => current.filter((record) => record.id !== id));
+    setRecords((current) => current.filter((r) => r.id !== id));
+  };
+  const updateRecord = async (
+    id: string | number,
+    patch: { type: string; title: string; category: string; amount: number },
+  ) => {
+    try {
+      const response = await fetch(
+        `http://localhost:3333/api/transactions/${id}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            type: patch.type,
+            category: patch.category,
+            amount: patch.amount,
+            note: patch.title,
+          }),
+        },
+      );
+      if (response.ok) {
+        setRecords((current) =>
+          current.map((r) =>
+            r.id === id ? { ...r, ...patch } : r,
+          ),
+        );
+        void refreshSummary();
+      }
+    } catch {
+      // falha silenciosa — dados locais mantidos
+    }
   };
   const addTransaction = async (record: {
     type: string;
     title: string;
     category: string;
     amount: number;
+    recurrent?: boolean;
+    totalInstallments?: number;
   }) => {
     try {
       const response = await fetch("http://localhost:3333/api/transactions", {
@@ -395,15 +642,23 @@ function App() {
           category: record.category,
           amount: record.amount,
           note: record.title,
+          recurrent: record.recurrent ?? false,
+          totalInstallments: record.totalInstallments ?? 1,
         }),
       });
       if (response.ok) {
         const saved = await response.json();
-        setRecords((current) => [
-          { ...record, id: saved.id, date: "Agora" },
-          ...current,
-        ]);
+        const newItem: RecordItem = {
+          ...record,
+          id: saved.id,
+          date: "Agora",
+          recurrent: saved.recurrent,
+          installment: saved.installment,
+          totalInstallments: saved.totalInstallments,
+        };
+        setRecords((current) => [newItem, ...current]);
         void refreshProfile();
+        void refreshSummary();
         return;
       }
     } catch {}
@@ -412,17 +667,25 @@ function App() {
       ...current,
     ]);
   };
-  const availableBalance = useMemo(
-    () =>
-      records.reduce(
+  // Só transações com data <= hoje entram no saldo disponível.
+  // Parcelas futuras (ex: 12x criadas de uma vez) ficam no banco como
+  // "planejado" mas não afetam o saldo atual — só contam quando chegarem.
+  const availableBalance = useMemo(() => {
+    const today = new Date();
+    today.setHours(23, 59, 59, 999);
+    return records
+      .filter((r) => {
+        if (!r.isoDate) return true; // registros locais otimistas (sem isoDate) sempre contam
+        return new Date(r.isoDate) <= today;
+      })
+      .reduce(
         (sum, r) =>
           ["Receita", "Resgate"].includes(r.type)
             ? sum + r.amount
             : sum - r.amount,
         0,
-      ),
-    [records],
-  );
+      );
+  }, [records]);
   const refreshGoals = () =>
     fetch("http://localhost:3333/api/goals")
       .then((r) => (r.ok ? r.json() : Promise.reject()))
@@ -433,6 +696,13 @@ function App() {
       .then((r) => (r.ok ? r.json() : Promise.reject()))
       .then(setAssetList)
       .catch(() => undefined);
+  const [budgetList, setBudgetList] = useState<BudgetItem[]>([]);
+  const refreshBudgets = () =>
+    fetch("http://localhost:3333/api/budgets")
+      .then((r) => (r.ok ? r.json() : Promise.reject()))
+      .then(setBudgetList)
+      .catch(() => undefined);
+  useEffect(() => { refreshBudgets(); }, []);
   const total = summary?.total ?? 34740;
   const invested = summary?.invested ?? 25540;
   const cash = summary?.cash ?? 9200;
@@ -478,6 +748,13 @@ function App() {
     if (!prev || prev === 0) return null;
     return ((current - prev) / prev) * 100;
   }, [chartData]);
+
+  // Notificações derivadas dos dados já carregados — sem nenhuma nova chamada à API
+  const notifications = useMemo(
+    () => buildNotifications(goalList, assetList, summary),
+    [goalList, assetList, summary],
+  );
+
   return (
     <DialogContext.Provider value={{ confirmDialog, notify }}>
     <div className="app-shell">
@@ -542,9 +819,13 @@ function App() {
             </h1>
           </div>
           <div className="header-actions">
-            <button className="icon-button">
+            <button
+              className="icon-button"
+              onClick={() => setNotifOpen((o) => !o)}
+              aria-label="Notificações"
+            >
               <Bell size={19} />
-              <i />
+              {notifications.length > 0 && <i />}
             </button>
             <button className="add-button" onClick={() => setModal(true)}>
               <Plus size={17} /> Novo registro
@@ -575,6 +856,7 @@ function App() {
             records={records}
             onAdd={() => setModal(true)}
             onDelete={deleteRecord}
+            onEdit={updateRecord}
             goalList={goalList}
             refreshGoals={refreshGoals}
             assetList={assetList}
@@ -582,9 +864,20 @@ function App() {
             availableBalance={availableBalance}
             addTransaction={addTransaction}
             refreshProfile={refreshProfile}
+            total={total}
+            budgetList={budgetList}
+            refreshBudgets={refreshBudgets}
           />
         )}
       </main>
+      <AnimatePresence>
+        {notifOpen && (
+          <NotificationsPanel
+            notifications={notifications}
+            onClose={() => setNotifOpen(false)}
+          />
+        )}
+      </AnimatePresence>
       <AnimatePresence>
         {modal && (
           <RegisterModal
@@ -891,13 +1184,19 @@ type RecordItem = {
   title: string;
   category: string;
   amount: number;
-  date: string;
+  date: string;       // formatada "dd/mm/yyyy" para exibição
+  isoDate?: string;   // ISO original — usada para filtrar parcelas futuras
+  recurrent?: boolean;
+  installment?: number | null;
+  totalInstallments?: number | null;
 };
+type BudgetItem = { id: string; category: string; limit: number };
 function Workspace({
   page,
   records,
   onAdd,
   onDelete,
+  onEdit,
   goalList,
   refreshGoals,
   assetList,
@@ -905,11 +1204,15 @@ function Workspace({
   availableBalance,
   addTransaction,
   refreshProfile,
+  total,
+  budgetList,
+  refreshBudgets,
 }: {
   page: string;
   records: RecordItem[];
   onAdd: () => void;
-  onDelete: (id: string | number) => void;
+  onDelete: (record: RecordItem) => void;
+  onEdit: (id: string | number, patch: { type: string; title: string; category: string; amount: number }) => void;
   goalList: GoalItem[];
   refreshGoals: () => void;
   assetList: AssetItem[];
@@ -920,15 +1223,18 @@ function Workspace({
     title: string;
     category: string;
     amount: number;
+    recurrent?: boolean;
+    totalInstallments?: number;
   }) => void;
   refreshProfile: () => void;
+  total: number;
+  budgetList: BudgetItem[];
+  refreshBudgets: () => void;
 }) {
   const relevant =
     page === "Receitas" ? "Receita" : page === "Despesas" ? "Despesa" : "";
   const [tab, setTab] = useState(relevant || "Todos");
-  // Sempre que a página mudar (ex: Despesas -> Receitas), volta a
-  // filtrar pelo tipo da própria página em vez de manter "Todos" ou a
-  // aba da página anterior selecionada.
+  const [editingRecord, setEditingRecord] = useState<RecordItem | null>(null);
   useEffect(() => setTab(relevant || "Todos"), [relevant]);
   const monthLabel = new Date()
     .toLocaleDateString("pt-BR", { month: "long", year: "numeric" })
@@ -947,7 +1253,15 @@ function Workspace({
             <strong>
               {money.format(
                 records
-                  .filter((r) => r.type === relevant)
+                  .filter((r) => {
+                    if (r.type !== relevant) return false;
+                    // Só conta transações do mês atual e não futuras
+                    if (!r.isoDate) return true;
+                    const d = new Date(r.isoDate);
+                    const now = new Date();
+                    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+                    return d >= monthStart && d <= now;
+                  })
                   .reduce((s, r) => s + r.amount, 0),
               )}
             </strong>
@@ -987,9 +1301,26 @@ function Workspace({
           {records
             .filter((r) => tab === "Todos" || r.type === relevant)
             .map((r) => (
-              <RecordRow key={r.id} record={r} onDelete={onDelete} />
+              <RecordRow
+                key={r.id}
+                record={r}
+                onDelete={onDelete}
+                onEdit={setEditingRecord}
+              />
             ))}
         </section>
+        <AnimatePresence>
+          {editingRecord && (
+            <EditTransactionModal
+              record={editingRecord}
+              close={() => setEditingRecord(null)}
+              save={(patch) => {
+                onEdit(editingRecord.id, patch);
+                setEditingRecord(null);
+              }}
+            />
+          )}
+        </AnimatePresence>
       </motion.div>
     );
   if (page === "Patrimônio")
@@ -1007,17 +1338,27 @@ function Workspace({
     return (
       <GoalsPage items={goalList} refresh={refreshGoals} assetList={assetList} onXpGained={refreshProfile} />
     );
-  if (page === "Simulações") return <Simulator />;
+  if (page === "Simulações") return <Simulator initialPatrimony={total} />;
   if (page === "Cronograma") return <Timeline />;
+  if (page === "Orçamento")
+    return (
+      <BudgetPage
+        budgetList={budgetList}
+        refresh={refreshBudgets}
+        records={records}
+      />
+    );
   if (page === "Estatísticas") return <Stats records={records} />;
   return <Achievements />;
 }
 function RecordRow({
   record,
   onDelete,
+  onEdit,
 }: {
   record: RecordItem;
-  onDelete: (id: string | number) => void;
+  onDelete: (record: RecordItem) => void;
+  onEdit: (r: RecordItem) => void;
 }) {
   const positive = record.type !== "Despesa";
   return (
@@ -1029,6 +1370,10 @@ function RecordRow({
         <b>{record.title}</b>
         <span>
           {record.category} · {record.date}
+          {record.recurrent && <em className="badge-recurrent"> ↻ Recorrente</em>}
+          {record.totalInstallments && record.totalInstallments > 1 && (
+            <em className="badge-installment"> {record.installment}/{record.totalInstallments}x</em>
+          )}
         </span>
       </div>
       <div className="record-amount">
@@ -1038,10 +1383,19 @@ function RecordRow({
         </b>
         <span>{record.type}</span>
       </div>
+      {typeof record.id === "string" && (
+        <button
+          className="edit-button"
+          aria-label="Editar lançamento"
+          onClick={() => onEdit(record)}
+        >
+          <Pencil size={15} />
+        </button>
+      )}
       <button
         className="delete-button"
         aria-label="Excluir lançamento"
-        onClick={() => onDelete(record.id)}
+        onClick={() => onDelete(record)}
       >
         <Trash2 size={16} />
       </button>
@@ -1460,6 +1814,7 @@ function GoalsPage({
   const [target, setTarget] = useState("");
   const [category, setCategory] = useState(goalCategories[0]);
   const [priority, setPriority] = useState("Média");
+  const [deadline, setDeadline] = useState("");
   const [linkedAssetId, setLinkedAssetId] = useState("");
   // Investimentos já vinculados a algum objetivo não podem ser
   // escolhidos de novo em outro objetivo (vínculo é 1 para 1).
@@ -1478,6 +1833,7 @@ function GoalsPage({
         category,
         priority,
         assetId: linkedAssetId || null,
+        deadline: deadline || null,
       }),
     });
     if (response.ok) {
@@ -1487,6 +1843,7 @@ function GoalsPage({
       setName("");
       setTarget("");
       setPriority("Média");
+      setDeadline("");
       setLinkedAssetId("");
     } else {
       const body = await response.json().catch(() => null);
@@ -1577,6 +1934,14 @@ function GoalsPage({
                 </option>
               ))}
           </select>
+          <label className="goal-deadline-label">
+            Prazo (opcional)
+            <input
+              type="date"
+              value={deadline}
+              onChange={(e) => setDeadline(e.target.value)}
+            />
+          </label>
           <button className="save" onClick={save}>
             Salvar objetivo
           </button>
@@ -1685,9 +2050,16 @@ function GoalsPage({
     </motion.div>
   );
 }
-function Simulator() {
+function Simulator({ initialPatrimony }: { initialPatrimony: number }) {
   // --- inputs ---
-  const [initial, setInitial] = useState(34740);
+  const [initial, setInitial] = useState(initialPatrimony || 0);
+
+  // Sincroniza o valor inicial quando o patrimônio real chegar da API
+  // (na primeira renderização pode ser 0 ou o fallback; quando a API
+  // responde o componente recebe o valor real e atualiza o slider)
+  useEffect(() => {
+    setInitial(initialPatrimony || 0);
+  }, [initialPatrimony]);
   const [monthly, setMonthly] = useState(1500);
   const [rate, setRate] = useState(10);
   const [years, setYears] = useState(10);
@@ -2042,6 +2414,62 @@ function Stats({ records }: { records: RecordItem[] }) {
   const received = records
     .filter((r) => r.type === "Receita")
     .reduce((s, r) => s + r.amount, 0);
+  const invested = records
+    .filter((r) => r.type === "Aporte")
+    .reduce((s, r) => s + r.amount, 0);
+  const topAporte = records
+    .filter((r) => r.type === "Aporte")
+    .sort((a, b) => b.amount - a.amount)[0];
+
+  // Comparativo mês a mês: últimos 3 meses + mês atual
+  const now = new Date();
+  const months = Array.from({ length: 4 }, (_, i) => {
+    const d = new Date(now.getFullYear(), now.getMonth() - (3 - i), 1);
+    return {
+      key: `${d.getFullYear()}-${d.getMonth()}`,
+      label: d.toLocaleDateString("pt-BR", { month: "short" }).replace(".", ""),
+      year: d.getFullYear(),
+      month: d.getMonth(),
+    };
+  });
+
+  // Gastos por mês e categoria
+  const expenseCategories = categoriesByType["Despesa"] as string[];
+  const dataByMonth: Record<string, Record<string, number>> = {};
+  for (const m of months) dataByMonth[m.key] = {};
+
+  for (const r of records) {
+    if (r.type !== "Despesa") continue;
+    // Usa isoDate quando disponível (mais preciso); cai para r.date formatado
+    let d: Date;
+    if (r.isoDate) {
+      d = new Date(r.isoDate);
+    } else if (r.date === "Agora") {
+      d = now;
+    } else if (r.date.includes("/")) {
+      const [dd, mm, yyyy] = r.date.split("/");
+      d = new Date(Number(yyyy), Number(mm) - 1, Number(dd));
+    } else {
+      d = new Date(r.date);
+    }
+    // Ignora parcelas futuras — só conta o que já saiu
+    if (d > now) continue;
+    const key = `${d.getFullYear()}-${d.getMonth()}`;
+    if (!dataByMonth[key]) continue;
+    dataByMonth[key][r.category] = (dataByMonth[key][r.category] ?? 0) + r.amount;
+  }
+
+  const totalByMonth: Record<string, number> = {};
+  for (const m of months) {
+    totalByMonth[m.key] = Object.values(dataByMonth[m.key]).reduce((s, v) => s + v, 0);
+  }
+
+  const currentMonthKey = `${now.getFullYear()}-${now.getMonth()}`;
+  const prevMonthKey = months[months.length - 2]?.key;
+  const currentTotal = totalByMonth[currentMonthKey] ?? 0;
+  const prevTotal = totalByMonth[prevMonthKey] ?? 0;
+  const diffPct = prevTotal > 0 ? ((currentTotal - prevTotal) / prevTotal) * 100 : null;
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 8 }}
@@ -2057,26 +2485,75 @@ function Stats({ records }: { records: RecordItem[] }) {
           tone="green"
         />
         <Metric
-          label="Total investido"
-          value="R$ 1.200"
+          label="Total aportado"
+          value={money.format(invested)}
           sub="aportes registrados"
           icon={<TrendingUp />}
           tone="purple"
         />
         <Metric
           label="Maior aporte"
-          value="R$ 1.200"
-          sub="Tesouro Selic"
+          value={topAporte ? money.format(topAporte.amount) : "—"}
+          sub={topAporte ? topAporte.title : "Nenhum aporte"}
           icon={<Crown />}
           tone="gold"
         />
         <Metric
-          label="Sequência"
-          value="6 meses"
-          sub="investindo sem parar"
+          label="Despesas este mês"
+          value={money.format(currentTotal)}
+          sub={
+            diffPct !== null
+              ? `${diffPct >= 0 ? "+" : ""}${diffPct.toFixed(1)}% vs. mês anterior`
+              : "primeiro mês registrado"
+          }
           icon={<Sparkles />}
-          tone="blue"
+          tone={diffPct !== null && diffPct > 10 ? "gold" : "blue"}
         />
+      </section>
+
+      {/* Comparativo mês a mês por categoria */}
+      <section className="panel stats-comparison">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">ANÁLISE TEMPORAL</p>
+            <h2>Despesas por categoria</h2>
+          </div>
+        </div>
+        <div className="stats-month-header">
+          <span className="stats-cat-label" />
+          {months.map((m) => (
+            <span key={m.key} className={"stats-month-col" + (m.key === currentMonthKey ? " current" : "")}>
+              {m.label}
+            </span>
+          ))}
+        </div>
+        {expenseCategories
+          .filter((cat) => months.some((m) => (dataByMonth[m.key][cat] ?? 0) > 0))
+          .map((cat) => {
+            const maxVal = Math.max(...months.map((m) => dataByMonth[m.key][cat] ?? 0), 1);
+            return (
+              <div key={cat} className="stats-cat-row">
+                <span className="stats-cat-label">{cat}</span>
+                {months.map((m) => {
+                  const val = dataByMonth[m.key][cat] ?? 0;
+                  const barPct = (val / maxVal) * 100;
+                  return (
+                    <div key={m.key} className={"stats-month-col" + (m.key === currentMonthKey ? " current" : "")}>
+                      <div className="stats-mini-bar-wrap">
+                        <div className="stats-mini-bar" style={{ height: `${barPct}%` }} />
+                      </div>
+                      <span>{val > 0 ? money.format(val) : "—"}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })}
+        {months.every((m) => totalByMonth[m.key] === 0) && (
+          <p style={{ color: "#77738b", fontSize: 13, textAlign: "center", padding: "24px 0" }}>
+            Registre despesas para ver o comparativo mensal aqui.
+          </p>
+        )}
       </section>
     </motion.div>
   );
@@ -2472,7 +2949,7 @@ function RegisterModal({
   availableBalance,
 }: {
   close: () => void;
-  save: (r: Omit<RecordItem, "id" | "date">) => void;
+  save: (r: Omit<RecordItem, "id" | "date"> & { recurrent?: boolean; totalInstallments?: number }) => void;
   availableBalance: number;
 }) {
   const { confirmDialog } = useDialog();
@@ -2480,9 +2957,13 @@ function RegisterModal({
   const [category, setCategory] = useState(categoriesByType.Receita[0]);
   const [value, setValue] = useState("");
   const [title, setTitle] = useState("");
+  const [recurrent, setRecurrent] = useState(false);
+  const [installments, setInstallments] = useState("1");
   const chooseType = (t: string) => {
     setType(t);
     setCategory(categoriesByType[t][0]);
+    setRecurrent(false);
+    setInstallments("1");
   };
   const submit = async () => {
     const amount = Number(value.replace(",", "."));
@@ -2495,7 +2976,8 @@ function RegisterModal({
       ))
     )
       return;
-    save({ type, title, category, amount });
+    const totalInstallments = Math.max(1, parseInt(installments) || 1);
+    save({ type, title, category, amount, recurrent, totalInstallments });
     close();
   };
   return (
@@ -2545,7 +3027,11 @@ function RegisterModal({
           </p>
         )}
         <label>
-          Valor
+          {type === "Despesa" && !recurrent && parseInt(installments) > 1
+            ? `Valor total (${parseInt(installments)}x de ${money.format(
+                Math.round((Number(value.replace(",", ".")) / parseInt(installments)) * 100) / 100 || 0
+              )})`
+            : "Valor"}
           <input
             value={value}
             onChange={(e) => setValue(e.target.value)}
@@ -2572,11 +3058,266 @@ function RegisterModal({
             placeholder="Ex.: Aporte mensal"
           />
         </label>
+        {/* Opções extras: recorrência e parcelamento (só para Despesa) */}
+        {type === "Despesa" && (
+          <div className="extra-options">
+            <label className="toggle-row">
+              <span>Despesa recorrente (lança todo mês)</span>
+              <input
+                type="checkbox"
+                checked={recurrent}
+                onChange={(e) => {
+                  setRecurrent(e.target.checked);
+                  if (e.target.checked) setInstallments("1");
+                }}
+              />
+            </label>
+            {!recurrent && (
+              <label>
+                Parcelado em
+                <div className="installment-row">
+                  <input
+                    type="number"
+                    min="1"
+                    max="60"
+                    value={installments}
+                    onChange={(e) => setInstallments(e.target.value)}
+                    placeholder="1"
+                  />
+                  <span>parcela(s)</span>
+                </div>
+              </label>
+            )}
+          </div>
+        )}
         <button className="save" onClick={submit}>
-          Salvar registro
+          {type === "Despesa" && !recurrent && parseInt(installments) > 1
+            ? `Parcelar em ${parseInt(installments)}x`
+            : "Salvar registro"}
         </button>
       </motion.div>
     </motion.div>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Modal de edição de lançamento
+// ---------------------------------------------------------------------------
+function EditTransactionModal({
+  record,
+  close,
+  save,
+}: {
+  record: RecordItem;
+  close: () => void;
+  save: (patch: { type: string; title: string; category: string; amount: number }) => void;
+}) {
+  const [type, setType] = useState(record.type);
+  const [category, setCategory] = useState(record.category);
+  const [value, setValue] = useState(String(record.amount));
+  const [title, setTitle] = useState(record.title);
+  const chooseType = (t: string) => {
+    setType(t);
+    setCategory(categoriesByType[t]?.[0] ?? category);
+  };
+  const submit = () => {
+    const amount = Number(value.replace(",", "."));
+    if (!amount || !title) return;
+    save({ type, title, category, amount });
+  };
+  return (
+    <motion.div
+      className="overlay"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+    >
+      <motion.div
+        className="modal"
+        initial={{ scale: 0.96, y: 12 }}
+        animate={{ scale: 1, y: 0 }}
+        exit={{ scale: 0.96, y: 12 }}
+      >
+        <button className="modal-close" onClick={close}><X /></button>
+        <p className="eyebrow">EDITAR</p>
+        <h2>Editar lançamento</h2>
+        <div className="type-choice">
+          {["Receita", "Aporte", "Despesa"].map((t) => (
+            <button
+              key={t}
+              className={type === t ? "chosen" : ""}
+              onClick={() => chooseType(t)}
+            >
+              {t === "Receita" ? <ArrowUpRight /> : t === "Aporte" ? <TrendingUp /> : <ArrowDownRight />}
+              {t}
+            </button>
+          ))}
+        </div>
+        <label>
+          Valor
+          <input value={value} onChange={(e) => setValue(e.target.value)} placeholder="Ex.: 1200" autoFocus />
+        </label>
+        <label>
+          Categoria
+          <select value={category} onChange={(e) => setCategory(e.target.value)}>
+            {(categoriesByType[type] ?? [category]).map((c) => (
+              <option key={c}>{c}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Descrição
+          <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Ex.: Aluguel" />
+        </label>
+        <button className="save" onClick={submit}>Salvar alterações</button>
+      </motion.div>
+    </motion.div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Orçamento por categoria
+// ---------------------------------------------------------------------------
+function BudgetPage({
+  budgetList,
+  refresh,
+  records,
+}: {
+  budgetList: BudgetItem[];
+  refresh: () => void;
+  records: RecordItem[];
+}) {
+  const { notify } = useDialog();
+  const [editingCat, setEditingCat] = useState<string | null>(null);
+  const [limitValue, setLimitValue] = useState("");
+
+  // Gastos do mês atual por categoria
+  const now = new Date();
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const spentByCategory = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const r of records) {
+      if (r.type !== "Despesa") continue;
+      // Usa isoDate quando disponível; cai para parsing do formato brasileiro
+      const d = r.isoDate
+        ? new Date(r.isoDate)
+        : new Date(r.date.includes("/")
+          ? r.date.split("/").reverse().join("-")
+          : r.date);
+      // Só conta despesas do mês atual que já venceram (ignora parcelas futuras)
+      if (isNaN(d.getTime()) || d < monthStart || d > now) continue;
+      map[r.category] = (map[r.category] ?? 0) + r.amount;
+    }
+    return map;
+  }, [records]);
+
+  const allCategories = categoriesByType["Despesa"] as string[];
+  const budgetMap = useMemo(
+    () => Object.fromEntries(budgetList.map((b) => [b.category, b])),
+    [budgetList],
+  );
+
+  const save = async (cat: string) => {
+    const limit = Number(limitValue.replace(",", "."));
+    if (!limit || limit <= 0) return;
+    await fetch(`http://localhost:3333/api/budgets/${encodeURIComponent(cat)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ limit }),
+    });
+    refresh();
+    setEditingCat(null);
+    setLimitValue("");
+  };
+
+  const remove = async (cat: string) => {
+    await fetch(`http://localhost:3333/api/budgets/${encodeURIComponent(cat)}`, {
+      method: "DELETE",
+    });
+    refresh();
+  };
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="workspace"
+    >
+      <section className="panel budget-page">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">CONTROLE DE GASTOS</p>
+            <h2>Orçamento mensal</h2>
+          </div>
+        </div>
+        <p className="budget-hint">
+          Defina um teto de gastos por categoria. A barra fica vermelha ao ultrapassar 80%.
+        </p>
+        <div className="budget-list">
+          {allCategories.map((cat) => {
+            const budget = budgetMap[cat];
+            const spent = spentByCategory[cat] ?? 0;
+            const pct = budget ? Math.min(100, (spent / budget.limit) * 100) : 0;
+            const over = budget ? spent > budget.limit : false;
+            const warn = budget ? pct >= 80 : false;
+            return (
+              <div key={cat} className="budget-row">
+                <div className="budget-row-header">
+                  <span className="budget-cat">{cat}</span>
+                  <span className="budget-spent">
+                    {money.format(spent)}
+                    {budget && (
+                      <em className={over ? "over" : warn ? "warn" : ""}>
+                        {" "}/ {money.format(budget.limit)}
+                      </em>
+                    )}
+                  </span>
+                  <div className="budget-actions">
+                    <button
+                      className="edit-button"
+                      onClick={() => {
+                        setEditingCat(cat);
+                        setLimitValue(budget ? String(budget.limit) : "");
+                      }}
+                    >
+                      <Pencil size={14} />
+                    </button>
+                    {budget && (
+                      <button className="delete-button" onClick={() => remove(cat)}>
+                        <Trash2 size={14} />
+                      </button>
+                    )}
+                  </div>
+                </div>
+                {editingCat === cat ? (
+                  <div className="budget-edit-row">
+                    <input
+                      type="number"
+                      value={limitValue}
+                      onChange={(e) => setLimitValue(e.target.value)}
+                      placeholder="Limite em R$"
+                      autoFocus
+                    />
+                    <button className="save" onClick={() => save(cat)}>OK</button>
+                    <button className="delete-button" onClick={() => setEditingCat(null)}><X size={14} /></button>
+                  </div>
+                ) : budget ? (
+                  <div className="budget-bar-wrap">
+                    <div
+                      className={"budget-bar" + (over ? " over" : warn ? " warn" : "")}
+                      style={{ width: `${pct}%` }}
+                    />
+                  </div>
+                ) : (
+                  <p className="budget-no-limit">Sem limite definido</p>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </section>
+    </motion.div>
+  );
+}
+
 createRoot(document.getElementById("root")!).render(<App />);

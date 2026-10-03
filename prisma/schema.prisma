@@ -38,12 +38,23 @@ model Goal {
 }
 
 model Transaction {
+  id          String   @id @default(cuid())
+  type        String
+  category    String
+  amount      Float
+  date        DateTime @default(now())
+  note        String?
+  recurrent   Boolean  @default(false)
+  installment Int?     // número da parcela (1, 2, 3…)
+  totalInstallments Int? // total de parcelas do grupo
+  installmentGroup String? // cuid compartilhado pelas parcelas
+  createdAt   DateTime @default(now())
+}
+
+model Budget {
   id        String   @id @default(cuid())
-  type      String
-  category  String
-  amount    Float
-  date      DateTime @default(now())
-  note      String?
+  category  String   @unique
+  limit     Float
   createdAt DateTime @default(now())
 }
 
